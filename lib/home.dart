@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
-import 'screens.dart';
+import '/pages/levels_screen.dart';
+import '/pages/teachers_screen.dart';
+import '/pages/timetable_screen.dart';
+import '/pages/schedule_screen.dart';
 
 const _accent = Color(0xFF00E5CC);
 const _bg = Color(0xFF12121C);

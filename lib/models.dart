@@ -1,7 +1,7 @@
 class Subject {
   String id;
   String name;
-  double hoursPerWeek; // renamed from periodsPerWeek
+  double hoursPerWeek;
 
   Subject({required this.id, required this.name, required this.hoursPerWeek});
 
@@ -9,14 +9,12 @@ class Subject {
     'id': id,
     'name': name,
     'hoursPerWeek': hoursPerWeek,
-    // keep backward compat alias
     'periodsPerWeek': hoursPerWeek,
   };
 
   factory Subject.fromJson(Map<String, dynamic> j) => Subject(
     id: j['id'],
     name: j['name'],
-    // support both old 'periodsPerWeek' and new 'hoursPerWeek' keys
     hoursPerWeek: (j['hoursPerWeek'] ?? j['periodsPerWeek'] ?? 1).toDouble(),
   );
 }
@@ -27,20 +25,23 @@ class Level {
   List<Subject> subjects;
   String? groupId;
   int periodsPerDay;
-
-  /// Teacher IDs allowed to teach in this level.
-  /// Empty list = no restriction (all qualified teachers allowed).
   List<String> allowedTeacherIds;
+
+  /// Which day indices (0=Sun,1=Mon,...,6=Sat) are working days for this level.
+  /// Default: [0,1,2,3,4] = Sun–Thu
+  List<int> workingDays;
 
   Level({
     required this.id,
     required this.name,
     List<Subject>? subjects,
     this.groupId,
-    this.periodsPerDay = 6,
+    this.periodsPerDay = kDefaultPeriodsPerDay,
     List<String>? allowedTeacherIds,
+    List<int>? workingDays,
   }) : subjects = subjects ?? [],
-       allowedTeacherIds = allowedTeacherIds ?? [];
+       allowedTeacherIds = allowedTeacherIds ?? [],
+       workingDays = workingDays ?? [0, 1, 2, 3, 4];
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -49,6 +50,7 @@ class Level {
     'groupId': groupId,
     'periodsPerDay': periodsPerDay,
     'allowedTeacherIds': allowedTeacherIds,
+    'workingDays': workingDays,
   };
 
   factory Level.fromJson(Map<String, dynamic> j) => Level(
@@ -60,14 +62,15 @@ class Level {
     groupId: j['groupId'],
     periodsPerDay: j['periodsPerDay'] ?? 6,
     allowedTeacherIds: List<String>.from(j['allowedTeacherIds'] ?? []),
+    workingDays: j['workingDays'] != null
+        ? List<int>.from(j['workingDays'])
+        : [0, 1, 2, 3, 4],
   );
 }
 
 class LevelGroup {
   String id;
   String name;
-
-  /// Teacher IDs allowed for ALL levels in this group (union with level list).
   List<String> allowedTeacherIds;
 
   LevelGroup({
@@ -159,9 +162,15 @@ class DayTiming {
   final int startMinute;
   final int endHour;
   final int endMinute;
-
-  /// Break duration in minutes inserted between each period (0 = no break).
   final int breakMinutes;
+
+  static const kDefaultTiming = DayTiming(
+    startHour: 8,
+    startMinute: 0,
+    endHour: 20,
+    endMinute: 0,
+    breakMinutes: 0,
+  );
 
   const DayTiming({
     required this.startHour,
@@ -182,7 +191,7 @@ class DayTiming {
   factory DayTiming.fromJson(Map<String, dynamic> j) => DayTiming(
     startHour: j['startHour'] ?? 8,
     startMinute: j['startMinute'] ?? 0,
-    endHour: j['endHour'] ?? 14,
+    endHour: j['endHour'] ?? 20,
     endMinute: j['endMinute'] ?? 0,
     breakMinutes: j['breakMinutes'] ?? 0,
   );
@@ -214,9 +223,33 @@ class DayTiming {
     return _fmt(total ~/ 60, total % 60);
   }
 
+  /// Start time for a period that may exceed the originally-configured count.
+  /// Periods within [configuredCount] use normal math; extras extend linearly.
+  String periodStartLabelExtended(int index, int configuredCount) {
+    final dur = periodDurationMinutes(configuredCount);
+    final breakGap = breakMinutes;
+    final offset = index * (dur + breakGap);
+    final total = startHour * 60 + startMinute + offset;
+    return _fmt(total ~/ 60, total % 60);
+  }
+
+  String periodEndLabelExtended(int index, int configuredCount) {
+    final dur = periodDurationMinutes(configuredCount);
+    final breakGap = breakMinutes;
+    final offset = index * (dur + breakGap) + dur;
+    final total = startHour * 60 + startMinute + offset;
+    return _fmt(total ~/ 60, total % 60);
+  }
+
   String _fmt(int h, int m) =>
       '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
 }
 
-const List<String> kDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
-const int kPeriodsPerDay = 8;
+/// All 7 days for working-day selection purposes.
+const List<String> kAllDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/// Legacy alias used throughout the app — these are the default working days.
+const List<String> kDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu'];
+
+const int kPeriodsPerDay = 12; // 8am–8pm = 12 one-hour periods
+const int kDefaultPeriodsPerDay = 12;

@@ -101,17 +101,9 @@ class AppState extends ChangeNotifier {
     _notify();
   }
 
-  /// How many periods a subject needs given current timing.
-  /// Falls back to treating hoursPerWeek as a period count if no timing set.
-  int periodsNeeded(Subject s, int periodsPerDay) {
-    if (dayTiming == null) {
-      return s.hoursPerWeek.round().clamp(1, 99);
-    }
-    final durMins = dayTiming!.periodDurationMinutes(periodsPerDay);
-    if (durMins <= 0) return s.hoursPerWeek.round().clamp(1, 99);
-    // hoursPerWeek → minutes per week → number of periods
-    final minutesPerWeek = s.hoursPerWeek * 60;
-    return (minutesPerWeek / durMins).round().clamp(1, 99);
+  /// How many periods a subject needs — 1 period = 1 hour.
+  int periodsNeeded(Subject s) {
+    return s.hoursPerWeek.round().clamp(1, 99);
   }
 
   Future<Directory> _getStorageDir() async {
@@ -143,9 +135,11 @@ class AppState extends ChangeNotifier {
             : a.period.compareTo(b.period),
       );
 
+    final workingDayNames = level.workingDays.map((i) => kAllDays[i]).toList();
     final Map<String, List<Map<String, dynamic>>> byDay = {
-      for (final d in kDays) d: [],
+      for (final d in workingDayNames) d: [],
     };
+
     int assigned = 0, unassigned = 0;
     for (final slot in slots) {
       Subject? sub;
@@ -159,6 +153,9 @@ class AppState extends ChangeNotifier {
       } catch (_) {}
       teacher != null ? assigned++ : unassigned++;
 
+      final dayName = slot.day < kAllDays.length
+          ? kAllDays[slot.day]
+          : 'Day${slot.day}';
       final entry = <String, dynamic>{
         'period': slot.period + 1,
         'subject': sub?.name ?? '(unknown)',
@@ -175,12 +172,14 @@ class AppState extends ChangeNotifier {
           level.periodsPerDay,
         );
       }
-      byDay[kDays[slot.day]]!.add(entry);
+      byDay[dayName]?.add(entry);
     }
+
     final export = {
       'generated_at': DateTime.now().toIso8601String(),
       'level': level.name,
       'periods_per_day': level.periodsPerDay,
+      'working_days': workingDayNames,
       'total_slots': slots.length,
       'assigned': assigned,
       'unassigned': unassigned,
@@ -257,6 +256,11 @@ class AppState extends ChangeNotifier {
     _notify();
   }
 
+  void updateLevelWorkingDays(String levelId, List<int> workingDays) {
+    levels.firstWhere((l) => l.id == levelId).workingDays = workingDays;
+    _notify();
+  }
+
   void addSubjectToLevel(String levelId, Subject subject) {
     levels.firstWhere((l) => l.id == levelId).subjects.add(subject);
     _notify();
@@ -313,7 +317,6 @@ class AppState extends ChangeNotifier {
     _notify();
   }
 
-  /// Subject names (lowercase) a teacher can teach, resolved across all levels.
   Set<String> teacherSubjectNames(String teacherId) {
     final t = teachers.firstWhere(
       (t) => t.id == teacherId,
@@ -331,7 +334,6 @@ class AppState extends ChangeNotifier {
     return names;
   }
 
-  /// Effective allowed teacher IDs for a level.
   Set<String> _allowedForLevel(Level level) {
     final s = <String>{...level.allowedTeacherIds};
     if (level.groupId != null) {
@@ -356,32 +358,67 @@ class AppState extends ChangeNotifier {
     }
 
     final rng = Random();
-    final int ppd = level.periodsPerDay;
-    final int total = ppd * kDays.length;
+    if (dayTiming == null || dayTiming!.totalMinutes <= 0) {
+      _notify();
+      return 'School timings not set.';
+    }
+
+    // Each period = 1 hour; ppd = number of one-hour slots in the school day
+    final int ppd = (dayTiming!.totalMinutes / 60).floor().clamp(1, 24);
+
+    // Use the level's working days (indices into kAllDays)
+    final workingDays = level.workingDays.isNotEmpty
+        ? level.workingDays
+        : [0, 1, 2, 3, 4];
+
+    final int numDays = workingDays.length;
+    final int total = ppd * numDays;
     final allowed = _allowedForLevel(level);
+
+    final allSubjectIdToName = <String, String>{};
+    for (final lv in levels) {
+      for (final s in lv.subjects) {
+        allSubjectIdToName[s.id] = s.name.trim().toLowerCase();
+      }
+    }
     final qualMap = <String, Set<String>>{
-      for (final t in teachers) t.id: teacherSubjectNames(t.id),
+      for (final t in teachers)
+        t.id: {
+          for (final sid in t.subjectIds)
+            if (allSubjectIdToName.containsKey(sid)) allSubjectIdToName[sid]!,
+        },
     };
 
-    // Build subject queue using hoursPerWeek → period count
     final queue = <Subject>[];
     for (final s in level.subjects) {
-      final count = periodsNeeded(s, ppd);
+      final count = periodsNeeded(s);
       for (int i = 0; i < count; i++) queue.add(s);
     }
+
     if (queue.length > total) {
-      return 'Not enough slots for ${level.name}: need ${queue.length} periods but only $total available (${kDays.length} days × $ppd periods).';
-    }
-    // Pad with most-frequent subjects
-    if (queue.length < total) {
-      final sorted = List<Subject>.from(
-        level.subjects,
-      )..sort((a, b) => periodsNeeded(b, ppd).compareTo(periodsNeeded(a, ppd)));
-      int i = 0;
-      while (queue.length < total) queue.add(sorted[i++ % sorted.length]);
+      queue.shuffle(rng);
+      final counts = <String, int>{};
+      for (final s in queue) {
+        counts[s.id] = (counts[s.id] ?? 0) + 1;
+      }
+      final scale = total / queue.length;
+      final newCounts = <String, int>{};
+      for (final entry in counts.entries) {
+        newCounts[entry.key] = (entry.value * scale).floor().clamp(
+          1,
+          entry.value,
+        );
+      }
+      final trimmed = <Subject>[];
+      for (final s in level.subjects) {
+        final n = newCounts[s.id] ?? 0;
+        for (int i = 0; i < n; i++) trimmed.add(s);
+      }
+      queue
+        ..clear()
+        ..addAll(trimmed.take(total));
     }
 
-    // Sort queue: fewest eligible teachers first
     queue.shuffle(rng);
     queue.sort((a, b) {
       int count(Subject s) => teachers.where((t) {
@@ -391,17 +428,19 @@ class AppState extends ChangeNotifier {
       return count(a).compareTo(count(b));
     });
 
-    // Assign subjects to (day, period) slots, spreading across days
+    // Build slot pool using actual working day indices
     final slotPool = <_DP>[
-      for (int d = 0; d < kDays.length; d++)
-        for (int p = 0; p < ppd; p++) _DP(d, p),
+      for (final dayIdx in workingDays)
+        for (int p = 0; p < ppd; p++) _DP(dayIdx, p),
     ]..shuffle(rng);
+
+    final trimmedPool = slotPool.take(queue.length).toList();
 
     final subjectDays = <String, Set<int>>{
       for (final s in level.subjects) s.id: {},
     };
     final assignments = <_Assign>[];
-    final pool = List<_DP>.from(slotPool);
+    final pool = List<_DP>.from(trimmedPool);
 
     for (final subject in queue) {
       final used = subjectDays[subject.id] ?? {};
@@ -416,17 +455,20 @@ class AppState extends ChangeNotifier {
       assignments.add(_Assign(slot: chosen, subject: subject));
     }
 
-    // Global busy from other levels
     final globalBusy = <String, Map<int, Set<int>>>{
       for (final t in teachers)
-        t.id: {for (int d = 0; d < kDays.length; d++) d: {}},
+        t.id: {for (int d = 0; d < kAllDays.length; d++) d: {}},
     };
     for (final slot in timetable) {
       if (slot.teacherId != null)
         globalBusy[slot.teacherId!]?[slot.day]?.add(slot.period);
     }
 
-    final hoursUsed = <String, int>{for (final t in teachers) t.id: 0};
+    final hoursUsed = <String, int>{
+      for (final t in teachers)
+        t.id: timetable.where((s) => s.teacherId == t.id).length,
+    };
+
     final result = <TimetableSlot>[];
 
     _solve(
@@ -459,7 +501,6 @@ class AppState extends ChangeNotifier {
   }) {
     if (index == assignments.length) return true;
 
-    // MRV
     int bestIdx = index;
     int bestCnt = _eligible(
       assignments[index],
@@ -491,7 +532,6 @@ class AppState extends ChangeNotifier {
     final sl = cur.slot;
     var eligible = _eligible(cur, qualMap, allowed, globalBusy, hoursUsed);
 
-    // Subject swap
     if (eligible.isEmpty) {
       for (int j = index + 1; j < assignments.length; j++) {
         final other = assignments[j];
@@ -527,7 +567,6 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    // Accept null if still no teacher
     if (eligible.isEmpty) {
       result.add(
         TimetableSlot(
